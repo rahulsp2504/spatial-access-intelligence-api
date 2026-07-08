@@ -57,15 +57,20 @@ def _travel_dist_m(mode: str, travel_time_minutes: int) -> int:
 def _add_travel_time(G: nx.MultiDiGraph, mode: str) -> nx.MultiDiGraph:
     """
     Attach `travel_time` (seconds) to every edge.
-    Walk: constant 5 km/h.  Drive: OSM maxspeed tags via osmnx.
+
+    Both modes use a constant speed applied to the OSM edge `length`:
+      walk  → 5 km/h  (pedestrian network)
+      drive → 50 km/h (urban driving average on the drivable network)
+
+    Using constant speeds avoids osmnx's maxspeed tag parser, which fails
+    on OSM data where the `highway` or `maxspeed` attribute is a float or
+    list instead of a plain string. The drive/walk distinction is preserved
+    through the network type loaded by osmnx (walk-only paths excluded from
+    the drive graph), so isochrone shapes correctly differ between modes.
     """
-    if mode == "walk":
-        speed_ms = 5 * 1_000 / 3_600  # m/s
-        for _, _, data in G.edges(data=True):
-            data["travel_time"] = data.get("length", 0) / speed_ms
-    else:
-        G = ox.add_edge_speeds(G)
-        G = ox.add_edge_travel_times(G)
+    speed_ms = (5 if mode == "walk" else 50) * 1_000 / 3_600
+    for _, _, data in G.edges(data=True):
+        data["travel_time"] = data.get("length", 0) / speed_ms
     return G
 
 

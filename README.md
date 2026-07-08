@@ -183,14 +183,15 @@ in PostGIS — no client-side geometry arithmetic.
 Measured on DigitalOcean App Platform (Basic, 1 vCPU / 512 MB) with ~2,400
 Orange County facilities seeded. Isochrone times are **warm** (graph in memory).
 
-| Endpoint | p50 | p95 | notes |
-|---|---|---|---|
-| `GET /facilities/nearest` | ~18 ms | ~32 ms | GIST index scan |
-| `POST /isochrone` (walk, 15 min) | ~1.1 s | ~2.0 s | warm cache |
-| `POST /isochrone` (drive, 15 min) | ~1.4 s | ~2.6 s | warm cache |
-| `POST /coverage/gap` (10 facilities) | ~11 s | ~18 s | parallel isochrones |
-| Cold-start isochrone (OSM download) | ~4–8 s | — | one-time per area |
+| Endpoint | p50 | p95 | min | max | notes |
+|---|---|---|---|---|---|
+| `GET /facilities/nearest` | 3 ms | 5 ms | 2 ms | 5 ms | GIST index scan, 508 facilities |
+| `POST /isochrone` (walk, 15 min) | 82 ms | 88 ms | 81 ms | 88 ms | warm graph cache |
+| `POST /isochrone` (drive, 15 min) | 582 ms | 789 ms | 567 ms | 789 ms | warm graph cache, larger network |
+| `POST /coverage/gap` (9 groceries) | 684 ms | 904 ms | 676 ms | 904 ms | parallel isochrones + ST_Union/ST_Difference |
+| Cold-start isochrone (OSM download) | ~5–10 s | — | — | — | one-time per area, saved to disk |
 
+Measured locally on MacBook (Apple M-series), Docker Compose stack, 508 seeded facilities.
 Run `python scripts/benchmark.py` against a live instance to reproduce.
 
 ---
@@ -199,15 +200,13 @@ Run `python scripts/benchmark.py` against a live instance to reproduce.
 
 Seeded with OSM POIs for **Orange County, CA** via `osmnx.features_from_place()`:
 
-| Facility type | OSM tags | Approx count |
+| Facility type | OSM tags | Count |
 |---|---|---|
-| `hospital` | `amenity=hospital` | ~60 |
-| `grocery` | `shop=supermarket,grocery` | ~350 |
-| `ev_charger` | `amenity=charging_station` | ~400 |
-| `school` | `amenity=school,university,college` | ~700 |
+| `hospital` | `amenity=hospital` | 37 |
+| `grocery` | `shop=supermarket,grocery` | 317 |
+| `ev_charger` | `amenity=charging_station` | 154 |
 
-The `grocery` layer is extended with California food-desert tract centroids
-from [my food-desert analysis project](https://github.com/rahulsp2504/california-food-desert-analysis).
+**Total: 508 facilities.** Seeded via `python scripts/seed_facilities.py` — re-run safe (truncates before insert).
 
 ---
 
