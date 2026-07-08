@@ -5,21 +5,24 @@ Seed the PostGIS facilities table with OSM POIs for Orange County, CA.
 Usage:
     python scripts/seed_facilities.py
 
-Requires:
-    DATABASE_URL env var or .env file at project root.
-    osmnx, asyncpg, python-dotenv installed.
+Facility types seeded:
+    hospital   — amenity=hospital
+    grocery    — shop=supermarket|grocery
+    ev_charger — amenity=charging_station
 
-Data sources:
-    - OSM via osmnx.features_from_place() (no API key required)
-    - hospitality, grocery, EV chargers, schools for Orange County
+Schools excluded: OSM returns 2000+ school polygons for OC which
+reliably exceeds the Overpass API timeout. The three types above
+fully demonstrate all API endpoints.
+
+Re-run safe: TRUNCATE before insert, so no duplicate accumulation.
 """
 
 import asyncio
 import os
 import sys
+import warnings
 from pathlib import Path
 
-# Allow running from repo root or scripts/ dir
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import asyncpg
@@ -28,21 +31,23 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+warnings.filterwarnings("ignore")
+
+ox.settings.overpass_settings = '[out:json][timeout:90]'
+ox.settings.log_console = False
+
 PLACE = "Orange County, California, USA"
 
-# OSM tag filters per facility type
-FACILITY_TAGS: dict[str, dict] = {
-    "hospital": {"amenity": "hospital"},
-    "grocery": {"shop": ["supermarket", "grocery"]},
-    "ev_charger": {"amenity": "charging_station"},
-    "school": {"amenity": ["school", "university", "college"]},
-}
+FACILITY_TAGS: list[tuple[str, dict]] = [
+    ("hospital",   {"amenity": "hospital"}),
+    ("grocery",    {"shop": ["supermarket", "grocery"]}),
+    ("ev_charger", {"amenity": "charging_station"}),
+]
 
 
 async def ensure_schema(conn: asyncpg.Connection) -> None:
     await conn.execute("CREATE EXTENSION IF NOT EXISTS postgis")
-    await conn.execute(
-        """
+    await conn.execute("""
         CREATE TABLE IF NOT EXISTS facilities (
             id            SERIAL PRIMARY KEY,
             name          TEXT NOT NULL,
@@ -51,8 +56,7 @@ async def ensure_schema(conn: asyncpg.Connection) -> None:
             osm_id        TEXT,
             address       TEXT
         )
-        """
-    )
+    """)
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_facilities_geom ON facilities USING GIST (geom)"
     )
@@ -62,18 +66,28 @@ async def ensure_schema(conn: asyncpg.Connection) -> None:
 
 
 async def seed_type(
-    conn: asyncpg.Connection, ftype: str, tags: dict
+    conn: asyncpg.Connection, ftype: str, tags: dict, attempt: int = 1
 ) -> int:
-    print(f"  Fetching '{ftype}' from OSM …", end=" ", flush=True)
+    print(f"  Fetching '{ftype}' {tags} …", end=" ", flush=True)
     try:
         gdf = ox.features_from_place(PLACE, tags=tags)
     except Exception as exc:
-        print(f"FAILED ({exc})")
+        if attempt < 3:
+            print(f"retrying ({exc}) …", end=" ", flush=True)
+            await asyncio.sleep(8)
+            return await seed_type(conn, ftype, tags, attempt + 1)
+        print(f"FAILED after {attempt} attempts ({exc})")
         return 0
 
-    # Use centroid for polygons/multipolygons (e.g. supermarket building footprints)
     gdf = gdf[gdf.geometry.geom_type.isin(["Point", "Polygon", "MultiPolygon"])].copy()
+    if gdf.empty:
+        print("0 rows (no features matched)")
+        return 0
+
+    # Reproject to metric CRS for accurate centroid, then back to WGS84
+    gdf = gdf.to_crs("EPSG:3857")
     gdf["centroid"] = gdf.geometry.centroid
+    gdf = gdf.set_geometry("centroid").to_crs("EPSG:4326")
 
     rows: list[tuple] = []
     for _, row in gdf.iterrows():
@@ -81,7 +95,6 @@ async def seed_type(
         name = raw_name if isinstance(raw_name, str) and raw_name.strip() else f"Unknown {ftype}"
         lon = row["centroid"].x
         lat = row["centroid"].y
-        # osmnx MultiIndex: (element_type, osmid)
         osm_id = str(row.name[1]) if isinstance(row.name, tuple) else None
         rows.append((name, ftype, lon, lat, osm_id))
 
@@ -102,7 +115,7 @@ async def seed_type(
 async def main() -> None:
     db_url = os.getenv(
         "DATABASE_URL",
-        "postgresql://postgres:postgres@localhost:5432/spatial_api",
+        "postgresql://postgres:postgres@localhost:5433/spatial_api",
     )
     print(f"Connecting to {db_url} …")
     conn = await asyncpg.connect(db_url)
@@ -110,8 +123,12 @@ async def main() -> None:
     print("Ensuring schema …")
     await ensure_schema(conn)
 
+    # Safe to re-run: wipe existing rows before inserting
+    await conn.execute("TRUNCATE TABLE facilities RESTART IDENTITY")
+    print("Cleared existing rows.\n")
+
     total = 0
-    for ftype, tags in FACILITY_TAGS.items():
+    for ftype, tags in FACILITY_TAGS:
         total += await seed_type(conn, ftype, tags)
 
     await conn.close()
